@@ -21,6 +21,16 @@ data["RSI"] = 100 - (100 / (1 + (data["Close"].diff().clip(lower=0).rolling(14).
 data["Buy_Signal"] = (data["RSI"] < 30) & (data["SMA_20"] > data["SMA_50"])
 data["Sell_Signal"] = (data["RSI"] > 70) & (data["SMA_20"] < data["SMA_50"])
 
+# ✅ Show recommendations
+st.subheader("📢 Trading Recommendations")
+latest = data.iloc[-1]  # most recent row
+if latest["Buy_Signal"]:
+    st.success(f"✅ BUY Signal detected at price {latest['Close']:.4f} (RSI={latest['RSI']:.2f})")
+elif latest["Sell_Signal"]:
+    st.error(f"❌ SELL Signal detected at price {latest['Close']:.4f} (RSI={latest['RSI']:.2f})")
+else:
+    st.info(f"⏳ No clear signal right now. Price={latest['Close']:.4f}, RSI={latest['RSI']:.2f}")
+
 st.write("### Recent Data with Signals", data.tail())
 
 # Plot chart
