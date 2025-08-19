@@ -2,14 +2,6 @@ yfinance
 pandas
 numpy
 matplotlib
-seaborn
 scikit-learn
-tensorflow
-keras
-pytesseract
-opencv-python
-Pillow
-flask
+tensorflow-cpu==2.12.0
 streamlit
-requests
-python-telegram-bot
