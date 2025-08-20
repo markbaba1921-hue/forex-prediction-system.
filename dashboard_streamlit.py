@@ -10,12 +10,13 @@ def compute_indicators(df):
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
 
-    # RSI
+    # RSI (clean 1D version)
     delta = df["Close"].diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14).mean()
-    avg_loss = pd.Series(loss).rolling(window=14).mean()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
     rs = avg_gain / avg_loss
     df["RSI14"] = 100 - (100 / (1 + rs))
 
@@ -80,7 +81,7 @@ if st.button("Get Signals"):
                 price_now = float(latest["Close"])
                 rsi_now = float(latest["RSI14"])
                 macd_hist_now = float(latest["MACD_hist"])
-                signal_now = str(latest.get("signal", "HOLD"))  # safe fallback
+                signal_now = str(latest.get("signal", "HOLD"))
                 conf_now = float(latest.get("conf_score", 0))
 
                 st.subheader("📢 Recommendation (now)")
