@@ -104,23 +104,35 @@ def generate_signals(ind: pd.DataFrame, rsi_buy_max: int, rsi_sell_min: int) -> 
 sig = generate_signals(ind, rsi_buy_max, rsi_sell_min)
 
 # -------------------------------
-# Now: latest recommendation
+# Now: latest recommendation (safe version)
 # -------------------------------
-latest = sig.iloc[-1]
-price_now = float(latest["Close"])
-rsi_now = float(latest["RSI14"])
-macd_hist_now = float(latest["MACD_hist"])
-signal_now = latest["signal"]
-conf_now = float(latest["conf_score"])
-
-st.subheader("📢 Recommendation (now)")
-if signal_now == "BUY":
-    st.success(f"✅ BUY at {price_now:.5f}  | RSI={rsi_now:.1f}, MACD_hist={macd_hist_now:.5f}, Confidence={conf_now:.2f}")
-elif signal_now == "SELL":
-    st.error(f"❌ SELL at {price_now:.5f} | RSI={rsi_now:.1f}, MACD_hist={macd_hist_now:.5f}, Confidence={conf_now:.2f}")
+if sig.empty:
+    st.warning("No signal data available yet. Try longer lookback.")
 else:
-    st.info(f"⏳ WAIT  | Price={price_now:.5f}, RSI={rsi_now:.1f}, MACD_hist={macd_hist_now:.5f}")
+    latest = sig.iloc[-1]
+    price_now = float(latest["Close"])
+    rsi_now = float(latest["RSI14"])
+    macd_hist_now = float(latest["MACD_hist"])
+    signal_now = str(latest.get("signal", "HOLD"))  # safe fallback
+    conf_now = float(latest.get("conf_score", 0))
 
+    st.subheader("📢 Recommendation (now)")
+
+    if signal_now == "BUY":
+        st.success(
+            f"✅ BUY at {price_now:.5f}  | RSI={rsi_now:.1f}, "
+            f"MACD_hist={macd_hist_now:.5f}, Confidence={conf_now:.2f}"
+        )
+    elif signal_now == "SELL":
+        st.error(
+            f"❌ SELL at {price_now:.5f} | RSI={rsi_now:.1f}, "
+            f"MACD_hist={macd_hist_now:.5f}, Confidence={conf_now:.2f}"
+        )
+    else:
+        st.info(
+            f"⏳ WAIT  | Price={price_now:.5f}, RSI={rsi_now:.1f}, "
+            f"MACD_hist={macd_hist_now:.5f}"
+        )
 # -------------------------------
 # Last 5 signals (history)
 # -------------------------------
