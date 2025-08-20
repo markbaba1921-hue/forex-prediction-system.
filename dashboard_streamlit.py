@@ -1,110 +1,114 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
-import yfinance as yf
+import ta
+import plotly.graph_objs as go
 
-# -------------------------------
-# Technical Indicator Functions
-# -------------------------------
+# ----------------------------
+# Compute indicators
+# ----------------------------
 def compute_indicators(df):
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
 
-    # RSI (clean 1D version)
-    delta = df["Close"].diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    rsi = ta.momentum.RSIIndicator(df["Close"], window=14)
+    df["RSI14"] = rsi.rsi()
 
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss
-    df["RSI14"] = 100 - (100 / (1 + rs))
-
-    # MACD
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema12 - ema26
-    df["MACD_signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACD_hist"] = df["MACD"] - df["MACD_signal"]
+    macd = ta.trend.MACD(df["Close"])
+    df["MACD"] = macd.macd()
+    df["Signal_Line"] = macd.macd_signal()
 
     return df
 
-# -------------------------------
-# Signal Generation
-# -------------------------------
+
+# ----------------------------
+# Generate trading signals
+# ----------------------------
 def generate_signals(df):
-    df["signal"] = "HOLD"
-    df.loc[
-        (df["EMA20"] > df["EMA50"]) & (df["RSI14"] < 70) & (df["MACD_hist"] > 0),
-        "signal"
-    ] = "BUY"
+    latest = df.iloc[-1]
 
-    df.loc[
-        (df["EMA20"] < df["EMA50"]) & (df["RSI14"] > 30) & (df["MACD_hist"] < 0),
-        "signal"
-    ] = "SELL"
+    signal = "🔍 Neutral"
+    color = "white"
 
-    df["conf_score"] = 0.0
-    df.loc[df["signal"] == "BUY", "conf_score"] = 0.7
-    df.loc[df["signal"] == "SELL", "conf_score"] = 0.7
-    return df
+    if latest["EMA20"] > latest["EMA50"] and latest["RSI14"] < 70 and latest["MACD"] > latest["Signal_Line"]:
+        signal = "🟢 BUY"
+        color = "green"
+    elif latest["EMA20"] < latest["EMA50"] and latest["RSI14"] > 30 and latest["MACD"] < latest["Signal_Line"]:
+        signal = "🔴 SELL"
+        color = "red"
 
-# -------------------------------
-# Streamlit App
-# -------------------------------
+    return signal, color
+
+
+# ----------------------------
+# Plot candlestick + indicators
+# ----------------------------
+def plot_candles(df, pair):
+    fig = go.Figure()
+
+    # Candlestick
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df['Open'],
+        high=df['High'],
+        low=df['Low'],
+        close=df['Close'],
+        name="Candles"
+    ))
+
+    # EMA lines
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='blue', width=1), name="EMA20"))
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA50'], line=dict(color='orange', width=1), name="EMA50"))
+
+    # Last signal arrow
+    sig, color = generate_signals(df)
+    last_price = df["Close"].iloc[-1]
+    last_time = df.index[-1]
+
+    if "BUY" in sig:
+        fig.add_annotation(x=last_time, y=last_price,
+                           text="BUY ⬆️", showarrow=True, arrowhead=2, font=dict(color="green"))
+    elif "SELL" in sig:
+        fig.add_annotation(x=last_time, y=last_price,
+                           text="SELL ⬇️", showarrow=True, arrowhead=2, font=dict(color="red"))
+
+    fig.update_layout(title=f"{pair} Price & Signals", xaxis_rangeslider_visible=False)
+    return fig
+
+
+# ----------------------------
+# Streamlit UI
+# ----------------------------
 st.set_page_config(page_title="Forex Signals", layout="wide")
 st.title("💹 Forex Signals — EMA/RSI/MACD")
 
-pair = st.text_input("Enter Forex Pair (Yahoo Finance format, e.g. EURUSD=X):", "EURUSD=X")
-period = st.selectbox("Select Time Period:", ["1mo", "3mo", "6mo", "1y"])
-interval = st.selectbox("Select Interval:", ["15m", "30m", "1h", "1d"])
+pair = st.text_input("Enter Forex Pair (Yahoo Finance format, e.g., EURUSD=X):", "EURUSD=X")
+period = st.selectbox("Select Time Period:", ["5d", "1mo", "3mo", "6mo", "1y"])
+interval = st.selectbox("Select Interval:", ["15m", "30m", "1h", "4h", "1d"])
 
 if st.button("Get Signals"):
     try:
         data = yf.download(pair, period=period, interval=interval)
+
         if data.empty:
             st.error("⚠️ No data found. Try another pair or interval.")
         else:
+            # FIX: flatten columns if MultiIndex
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = [col[0] for col in data.columns]
+
             df = compute_indicators(data)
-            sig = generate_signals(df)
+            sig, color = generate_signals(df)
 
-            st.subheader("📊 Price & Indicators (latest)")
-            st.line_chart(df[["Close", "EMA20", "EMA50"]])
+            st.subheader("📊 Latest Signal")
+            st.markdown(f"<h2 style='color:{color}'>{sig}</h2>", unsafe_allow_html=True)
 
-            # -------------------------------
-            # Now: latest recommendation (safe version)
-            # -------------------------------
-            if sig.empty:
-                st.warning("No signal data available yet. Try longer lookback.")
-            else:
-                latest = sig.iloc[-1]
-                price_now = float(latest["Close"])
-                rsi_now = float(latest["RSI14"])
-                macd_hist_now = float(latest["MACD_hist"])
-                signal_now = str(latest.get("signal", "HOLD"))
-                conf_now = float(latest.get("conf_score", 0))
+            st.subheader("📈 Candlestick Chart")
+            st.plotly_chart(plot_candles(df, pair), use_container_width=True)
 
-                st.subheader("📢 Recommendation (now)")
-
-                if signal_now == "BUY":
-                    st.success(
-                        f"✅ BUY at {price_now:.5f}  | RSI={rsi_now:.1f}, "
-                        f"MACD_hist={macd_hist_now:.5f}, Confidence={conf_now:.2f}"
-                    )
-                elif signal_now == "SELL":
-                    st.error(
-                        f"❌ SELL at {price_now:.5f} | RSI={rsi_now:.1f}, "
-                        f"MACD_hist={macd_hist_now:.5f}, Confidence={conf_now:.2f}"
-                    )
-                else:
-                    st.info(
-                        f"⏳ WAIT  | Price={price_now:.5f}, RSI={rsi_now:.1f}, "
-                        f"MACD_hist={macd_hist_now:.5f}"
-                    )
-
-            # Show signals table
-            st.subheader("📑 Signals Table")
-            st.dataframe(sig.tail(20))
+            st.subheader("📑 Data Preview")
+            st.dataframe(df.tail())
 
     except Exception as e:
-        st.error(f"Error: {str(e)}")
+        st.error(f"Error: {e}")
