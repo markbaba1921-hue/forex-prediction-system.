@@ -1,37 +1,37 @@
-import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import ta
 from streamlit_autorefresh import st_autorefresh
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score
+import requests
+import feedparser
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
-# --------------------------
-# Page
-# --------------------------
-st.set_page_config(page_title="Forex Live Signals (Stable)", layout="wide")
-st.title("⚡ Forex Live Signals — Stable Chart, Precise Time, Real-Time Alerts")
+# ------------- App setup -------------
+st.set_page_config(page_title="Forex Pro — Live Signals", layout="wide")
+st.title("⚡ Forex Pro — Live Signals (Stable + ML + News)")
 
-# Your display timezone (change if you like)
-APP_TZ = "Africa/Addis_Ababa"
+APP_TZ = "Africa/Addis_Ababa"  # change if you prefer
 
-# --------------------------
-# Data
-# --------------------------
+# ------------- Helpers -------------
 @st.cache_data(ttl=30)
 def fetch_prices(pair: str, interval: str, period: str) -> pd.DataFrame:
-    """Fetch from Yahoo Finance; flatten columns; localize timezone."""
     df = yf.download(pair, interval=interval, period=period, auto_adjust=True, progress=False)
     if df is None or df.empty:
         return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
     df = df.dropna()
-    # Index to tz-aware, then convert to desired TZ
+    # timezones
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     df.index = df.index.tz_convert(APP_TZ)
@@ -51,7 +51,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     x["ATR14"] = atr.average_true_range()
     return x.replace([np.inf, -np.inf], np.nan).dropna()
 
-def add_signals(df: pd.DataFrame) -> pd.DataFrame:
+def tech_signals(df: pd.DataFrame) -> pd.DataFrame:
     s = df.copy()
     bull = (s["EMA20"] > s["EMA50"]) & (s["RSI14"] < 70) & (s["MACD"] > s["MACD_signal"])
     bear = (s["EMA20"] < s["EMA50"]) & (s["RSI14"] > 30) & (s["MACD"] < s["MACD_signal"])
@@ -59,14 +59,11 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
     cross_dn = (s["EMA20"] < s["EMA50"]) & (s["EMA20"].shift(1) >= s["EMA50"].shift(1))
     vol_ok = s["ATR14"] / s["Close"] > 0.0005
 
-    s["Signal"] = "WAIT"
-    s.loc[(bull | cross_up) & vol_ok, "Signal"] = "BUY"
-    s.loc[(bear | cross_dn) & vol_ok, "Signal"] = "SELL"
+    s["TechSignal"] = "WAIT"
+    s.loc[(bull | cross_up) & vol_ok, "TechSignal"] = "BUY"
+    s.loc[(bear | cross_dn) & vol_ok, "TechSignal"] = "SELL"
 
-    s["PrevSignal"] = s["Signal"].shift(1).fillna("WAIT")
-    s["NewSignal"] = (s["Signal"] != "WAIT") & (s["Signal"] != s["PrevSignal"])
-
-    # confidence score 0..1 (how many techs agree)
+    # confidence score 0..1 (simple voting)
     s["tech_score"] = (
         (s["EMA20"] > s["EMA50"]).astype(int)
         + (s["RSI14"] < 70).astype(int)
@@ -74,61 +71,152 @@ def add_signals(df: pd.DataFrame) -> pd.DataFrame:
         + (s["MACD"] > s["MACD_signal"]).astype(int)
         + (s["ATR14"] / s["Close"] > 0.0005).astype(int)
     ) / 5.0
-
     return s
 
-# --------------------------
-# Sidebar / Controls
-# --------------------------
+# -------- News sentiment ----------
+analyzer = SentimentIntensityAnalyzer()
+
+@st.cache_data(ttl=300)
+def fetch_news_sentiment(pair: str):
+    """
+    Get Yahoo Finance RSS for the base currency (e.g., 'EUR', 'USD'),
+    score headlines with VADER, return mean sentiment (-1..1) and last headlines.
+    """
+    # crude mapping from 'EURUSD=X' -> ['EUR','USD']
+    bases = []
+    if "=" in pair:
+        base = pair.split("=")[0].upper()
+        if len(base) >= 6:
+            b1, b2 = base[:3], base[3:6]
+            bases = [b1, b2]
+    if not bases:
+        bases = ["USD"]
+
+    headlines = []
+    scores = []
+
+    for code in bases:
+        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={code}%3DX&region=US&lang=en-US"
+        try:
+            d = feedparser.parse(url)
+            for e in d.entries[:10]:
+                title = e.title
+                if title:
+                    s = analyzer.polarity_scores(title)["compound"]
+                    scores.append(s)
+                    headlines.append((title, s))
+        except Exception:
+            continue
+
+    if len(scores) == 0:
+        return 0.0, []
+
+    avg = float(np.mean(scores))
+    # normalize to 0..1
+    norm = (avg + 1) / 2.0
+    return norm, headlines[:15]
+
+# -------- ML model (light & fast) --------
+def build_features(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
+    x["ret1"] = x["Close"].pct_change()
+    x["ret3"] = x["Close"].pct_change(3)
+    x["ret6"] = x["Close"].pct_change(6)
+    x["ema_slope"] = x["EMA20"] - x["EMA20"].shift(3)
+    x["macd_hist_3"] = x["MACD_hist"].rolling(3).mean()
+    x["rsi_slope"] = x["RSI14"] - x["RSI14"].shift(3)
+    x["vol"] = x["ATR14"] / x["Close"]
+    x["future_ret"] = x["Close"].shift(-1) / x["Close"] - 1.0
+    x["y"] = (x["future_ret"] > 0).astype(int)  # 1 up, 0 down
+    feats = ["ret1","ret3","ret6","ema_slope","macd_hist_3","rsi_slope","vol",
+             "EMA20","EMA50","RSI14","MACD","MACD_signal","ATR14"]
+    x = x.dropna()
+    return x, feats
+
+def train_and_predict(xdf: pd.DataFrame, feats):
+    if len(xdf) < 200:
+        return 0.5, None  # not enough data, neutral
+    train = xdf.iloc[:-1]
+    test_last = xdf.iloc[-1:]
+
+    model = Pipeline([
+        ("scaler", StandardScaler()),
+        ("rf", RandomForestClassifier(n_estimators=120, max_depth=6, random_state=42))
+    ])
+    model.fit(train[feats], train["y"])
+    proba_up = float(model.predict_proba(test_last[feats])[:,1][0])  # up probability
+    return proba_up, model
+
+# ------------- UI controls -------------
 pair = st.text_input("Forex Pair (Yahoo format)", "EURUSD=X")
-colA, colB, colC, colD = st.columns([1,1,1,1.2])
-with colA:
+c1, c2, c3, c4 = st.columns([1,1,1,1.2])
+with c1:
     interval = st.selectbox("Interval", ["1m","5m","15m","30m","60m","1d"], index=1)
-with colB:
+with c2:
     period = st.selectbox("History", ["1d","5d","1mo","3mo","6mo","1y"], index=1)
-with colC:
+with c3:
     refresh_sec = st.slider("Auto-refresh (sec)", 5, 120, 15, step=5)
-with colD:
-    shown = st.slider("Show last N candles", 150, 3000, 600, step=50)
+with c4:
+    shown = st.slider("Show last N candles", 150, 4000, 700, step=50)
 
-# soft auto-refresh (preserves state)
-st_autorefresh(interval=refresh_sec*1000, key="auto_refresh")
+st_autorefresh(interval=refresh_sec*1000, key="auto_refresh_v2")
 
-# --------------------------
-# Pipeline
-# --------------------------
+# ------------- Data pipeline -------------
 raw = fetch_prices(pair, interval, period)
-if raw.empty or len(raw) < 60:
-    st.error("No/insufficient data. Try different pair, longer history, or slower interval.")
+if raw.empty or len(raw) < 80:
+    st.error("No or insufficient data. Try different pair, longer history, or slower interval.")
     st.stop()
 
 ind = add_indicators(raw)
-df = add_signals(ind)
-view = df.tail(shown)
+tech = tech_signals(ind)
+feat_df, feat_cols = build_features(tech)
+proba_up, model = train_and_predict(feat_df, feat_cols)
 
-# Latest bar (exact time)
-latest = df.iloc[-1]
+# News sentiment (0..1)
+news_score, headlines = fetch_news_sentiment(pair)
+
+# Latest
+latest = tech.iloc[-1]
 ts = latest.name.strftime("%Y-%m-%d %H:%M:%S %Z")
 
-# --------------------------
-# Live Signal box
-# --------------------------
-st.subheader("📢 Live Signal (latest candle)")
-if latest["Signal"] == "BUY":
-    msg = "✅ **BUY NOW**" if latest["NewSignal"] else "✅ BUY (still valid)"
-    st.success(f"{msg} — {ts} | Price: {latest['Close']:.5f} | Tech={latest['tech_score']:.2f}")
-elif latest["Signal"] == "SELL":
-    msg = "❌ **SELL NOW**" if latest["NewSignal"] else "❌ SELL (still valid)"
-    st.error(f"{msg} — {ts} | Price: {latest['Close']:.5f} | Tech={latest['tech_score']:.2f}")
-else:
-    st.info(f"⏳ WAIT — {ts} | Price: {latest['Close']:.5f} | Tech={latest['tech_score']:.2f}")
+# Composite score: tech (weight 0.4) + ML (0.4; mapped 0..1) + news (0.2)
+tech_component = float(latest["tech_score"])
+ml_component = float(proba_up)            # 0..1 up probability
+news_component = float(news_score)        # 0..1 positive
 
-# --------------------------
-# Stable Chart (Plotly)
-# --------------------------
+composite = 0.4*tech_component + 0.4*ml_component + 0.2*news_component
+
+if composite >= 0.58:
+    action = "BUY"
+elif composite <= 0.42:
+    action = "SELL"
+else:
+    action = "WAIT"
+
+# ------------- Live Signal box -------------
+st.subheader("📢 Live Signal (latest candle)")
+
+box = st.container()
+if action == "BUY":
+    box.success(
+        f"✅ **BUY NOW** — {ts} | Price: {latest['Close']:.5f}  | "
+        f"Tech={tech_component:.2f}  ML={ml_component:.2f}  News={news_component:.2f}  → Score={composite:.2f}"
+    )
+elif action == "SELL":
+    box.error(
+        f"❌ **SELL NOW** — {ts} | Price: {latest['Close']:.5f}  | "
+        f"Tech={tech_component:.2f}  ML={ml_component:.2f}  News={news_component:.2f}  → Score={composite:.2f}"
+    )
+else:
+    box.info(
+        f"⏳ **WAIT** — {ts} | Price: {latest['Close']:.5f}  | "
+        f"Tech={tech_component:.2f}  ML={ml_component:.2f}  News={news_component:.2f}  → Score={composite:.2f}"
+    )
+
+# ------------- Stable Plotly chart -------------
 st.subheader("📈 Price Chart (stable, zoom preserved)")
 
-# Plotly doesn't like tz-aware index on x, make a naive-local copy for plotting
+view = tech.tail(shown).copy()
 plot_df = view.copy()
 plot_df["t_plot"] = plot_df.index.tz_convert(APP_TZ).tz_localize(None)
 
@@ -149,45 +237,54 @@ fig.add_trace(go.Scatter(x=plot_df["t_plot"], y=plot_df["EMA20"], name="EMA20", 
 fig.add_trace(go.Scatter(x=plot_df["t_plot"], y=plot_df["EMA50"], name="EMA50", mode="lines"), row=1, col=1)
 
 # RSI
-fig.add_trace(go.Scatter(x=plot_df["t_plot"], y=plot_df["RSI14"], name="RSI14"), row=2, col=1)
+fig.add_trace(go.Scatter(x=plot_df["t_plot"], y=plot_df["RSI14"], name="RSI14", mode="lines"), row=2, col=1)
 fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
 fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
 # MACD
 fig.add_trace(go.Bar(x=plot_df["t_plot"], y=plot_df["MACD_hist"], name="MACD hist"), row=3, col=1)
-fig.add_trace(go.Scatter(x=plot_df["t_plot"], y=plot_df["MACD"], name="MACD"), row=3, col=1)
-fig.add_trace(go.Scatter(x=plot_df["t_plot"], y=plot_df["MACD_signal"], name="Signal"), row=3, col=1)
+fig.add_trace(go.Scatter(x=plot_df["t_plot"], y=plot_df["MACD"], name="MACD", mode="lines"), row=3, col=1)
+fig.add_trace(go.Scatter(x=plot_df["t_plot"], y=plot_df["MACD_signal"], name="Signal", mode="lines"), row=3, col=1)
 
-# Signal markers (arrows)
-sig_pts = plot_df[plot_df["Signal"].isin(["BUY","SELL"])].copy()
+# Signal markers
+sig_pts = plot_df[(plot_df["EMA20"].notna()) & (plot_df.index.isin(tech.index[tech["TechSignal"].isin(["BUY","SELL"])]))]
 if not sig_pts.empty:
+    marks = tech.loc[sig_pts.index, "TechSignal"]
     fig.add_trace(go.Scatter(
         x=sig_pts["t_plot"],
         y=sig_pts["Close"],
         mode="markers+text",
-        text=sig_pts["Signal"],
+        text=marks,
         textposition="top center",
-        marker=dict(symbol=["triangle-up" if s=="BUY" else "triangle-down" for s in sig_pts["Signal"]],
+        marker=dict(symbol=["triangle-up" if s=="BUY" else "triangle-down" for s in marks],
                     size=12),
-        name="Signals"
+        name="Tech Signals"
     ), row=1, col=1)
 
-# Layout: keep zoom/pan stable between refreshes
 fig.update_layout(
-    height=760,
+    height=780,
     xaxis_rangeslider_visible=False,
-    uirevision=f"{pair}_{interval}_v1",
+    uirevision=f"{pair}_{interval}_stable_v2",   # keeps your zoom on refresh
     legend=dict(orientation="h", y=1.02),
     margin=dict(l=10, r=10, t=30, b=10)
 )
 st.plotly_chart(fig, use_container_width=True)
 
-# --------------------------
-# Recent Signals table
-# --------------------------
-st.subheader("🧾 Recent Signals (exact time)")
-hist = df[df["Signal"].isin(["BUY","SELL"])][["Signal","Close"]].tail(40).copy()
-if not hist.empty:
-    hist["Time"] = hist.index.strftime("%Y-%m-%d %H:%M:%S %Z")
-    hist = hist[["Time","Signal","Close"]].rename(columns={"Close":"Price"})
-st.dataframe(hist if not hist.empty else pd.DataFrame({"Info":["No signals yet in the shown window."]}))
+# ------------- Recent signals -------------
+st.subheader("🧾 Recent BUY/SELL (exact time)")
+recent = tech[tech["TechSignal"].isin(["BUY","SELL"])][["TechSignal","Close"]].tail(40).copy()
+if not recent.empty:
+    recent["Time"] = recent.index.strftime("%Y-%m-%d %H:%M:%S %Z")
+    st.dataframe(recent.rename(columns={"TechSignal":"Signal","Close":"Price"})[["Time","Signal","Price"]])
+else:
+    st.info("No recent technical signals in the shown window.")
+
+# ------------- News panel -------------
+with st.expander("📰 Latest headlines & sentiment"):
+    if headlines:
+        news_df = pd.DataFrame(headlines, columns=["Headline","Sentiment (-1..1)"])
+        st.dataframe(news_df)
+    else:
+        st.write("No headlines available right now.")
+
+st.caption("Signals are for educational use only — not financial advice.")
