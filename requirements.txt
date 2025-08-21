@@ -6,7 +6,6 @@ plotly
 ta
 scikit-learn
 streamlit-autorefresh
-requests
+feedparser
 vaderSentiment
 pytz
-feedparser
