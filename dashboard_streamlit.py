@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import ta
 import plotly.graph_objs as go
+import time
 
 # ----------------------------
 # Compute indicators
@@ -17,6 +18,7 @@ def compute_indicators(df):
     macd = ta.trend.MACD(df["Close"])
     df["MACD"] = macd.macd()
     df["Signal_Line"] = macd.macd_signal()
+    df["MACD_Hist"] = macd.macd_diff()
 
     return df
 
@@ -35,24 +37,22 @@ def generate_signals(df):
 
 
 # ----------------------------
-# Plot candlestick chart
+# Plot advanced chart
 # ----------------------------
-def plot_candles(df, pair):
+def plot_chart(df, pair):
     fig = go.Figure()
 
-    # Candlesticks
+    # 🕯️ Candlestick
     fig.add_trace(go.Candlestick(
         x=df.index,
-        open=df['Open'],
-        high=df['High'],
-        low=df['Low'],
-        close=df['Close'],
+        open=df["Open"], high=df["High"],
+        low=df["Low"], close=df["Close"],
         name="Candles"
     ))
 
     # EMA lines
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='blue', width=1), name="EMA20"))
-    fig.add_trace(go.Scatter(x=df.index, y=df['EMA50'], line=dict(color='orange', width=1), name="EMA50"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], line=dict(color="blue", width=1), name="EMA20"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], line=dict(color="orange", width=1), name="EMA50"))
 
     # Buy signals
     buys = df[df["Signal"] == "BUY"]
@@ -72,52 +72,73 @@ def plot_candles(df, pair):
         text=["SELL"]*len(sells), textposition="bottom center"
     ))
 
-    fig.update_layout(title=f"{pair} Price & Signals", xaxis_rangeslider_visible=False)
+    fig.update_layout(title=f"{pair} Price & Signals", xaxis_rangeslider_visible=False, height=600)
     return fig
 
 
 # ----------------------------
 # Streamlit App
 # ----------------------------
-st.set_page_config(page_title="Forex Signals", layout="wide")
-st.title("💹 Forex Signals — EMA/RSI/MACD (with Time & History)")
+st.set_page_config(page_title="Forex Signals Live", layout="wide")
+st.title("⚡ Live Forex Signals — EMA/RSI/MACD")
 
 pair = st.text_input("Enter Forex Pair (e.g., EURUSD=X):", "EURUSD=X")
+interval = st.selectbox("Interval:", ["5m", "15m", "30m", "1h", "4h", "1d"])
+period = st.selectbox("Period:", ["5d", "1mo", "3mo"])
 
-# ✅ Only use safe intervals
-valid_intervals = ["30m", "1h", "4h", "1d"]
-interval = st.selectbox("Select Interval:", valid_intervals)
-period = st.selectbox("Select Time Period:", ["5d", "1mo", "3mo"])
+refresh_rate = st.slider("Auto-refresh every X seconds:", 10, 300, 60)
 
-if st.button("Get Signals"):
+placeholder = st.empty()
+
+while True:
     try:
         data = yf.download(pair, period=period, interval=interval)
 
         if data.empty:
-            st.error("⚠️ No data found. Try another pair or interval.")
+            placeholder.error("⚠️ No data found. Try another pair/interval.")
         else:
-            # Fix multiindex
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = [col[0] for col in data.columns]
-
-            # Keep timestamp
-            data.index = pd.to_datetime(data.index)
 
             df = compute_indicators(data)
             df = generate_signals(df)
 
-            # Latest signal
             latest = df.iloc[-1]
-            st.subheader("📊 Latest Signal")
-            st.write(f"**{latest['Signal']}** at {latest.name} (Price: {latest['Close']:.5f})")
 
-            # Chart
-            st.plotly_chart(plot_candles(df, pair), use_container_width=True)
+            with placeholder.container():
+                st.subheader("📊 Latest Signal")
+                st.write(f"**{latest['Signal']}** at {latest.name} (Price: {latest['Close']:.5f})")
 
-            # Signal history
-            st.subheader("📑 Recent Signals")
-            signal_history = df[df["Signal"] != "Neutral"][["Close", "Signal"]].tail(20)
-            st.dataframe(signal_history)
+                st.plotly_chart(plot_chart(df, pair), use_container_width=True)
+
+                col1, col2 = st.columns(2)
+
+                # RSI chart
+                with col1:
+                    st.subheader("RSI (14)")
+                    rsi_fig = go.Figure()
+                    rsi_fig.add_trace(go.Scatter(x=df.index, y=df["RSI14"], line=dict(color="purple"), name="RSI14"))
+                    rsi_fig.add_hline(y=70, line=dict(color="red", dash="dash"))
+                    rsi_fig.add_hline(y=30, line=dict(color="green", dash="dash"))
+                    rsi_fig.update_layout(height=250)
+                    st.plotly_chart(rsi_fig, use_container_width=True)
+
+                # MACD chart
+                with col2:
+                    st.subheader("MACD")
+                    macd_fig = go.Figure()
+                    macd_fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], line=dict(color="blue"), name="MACD"))
+                    macd_fig.add_trace(go.Scatter(x=df.index, y=df["Signal_Line"], line=dict(color="orange"), name="Signal"))
+                    macd_fig.add_trace(go.Bar(x=df.index, y=df["MACD_Hist"], name="Histogram", marker_color="gray"))
+                    macd_fig.update_layout(height=250)
+                    st.plotly_chart(macd_fig, use_container_width=True)
+
+                # Table of recent signals
+                st.subheader("📑 Recent Signals")
+                st.dataframe(df[df["Signal"] != "Neutral"][["Close", "Signal"]].tail(20))
+
+        time.sleep(refresh_rate)
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        placeholder.error(f"Error: {e}")
+        time.sleep(refresh_rate)
