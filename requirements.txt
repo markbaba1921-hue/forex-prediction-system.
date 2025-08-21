@@ -4,4 +4,8 @@ pandas
 numpy
 plotly
 ta
+vaderSentiment
+requests
+scikit-learn
 streamlit-autorefresh
+streamlit-lightweight-charts
