@@ -9,3 +9,4 @@ streamlit-autorefresh
 requests
 vaderSentiment
 pytz
+feedparser
