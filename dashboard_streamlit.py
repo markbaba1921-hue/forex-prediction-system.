@@ -17,6 +17,9 @@ def fetch_data(symbol, period="5d", interval="5m"):
         df = yf.download(symbol, period=period, interval=interval)
         if df.empty:
             return None
+        # flatten MultiIndex if exists
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] for col in df.columns]
         df = df.dropna()
         return df
     except Exception as e:
@@ -27,13 +30,13 @@ def fetch_data(symbol, period="5d", interval="5m"):
 # Compute indicators
 # ----------------------
 def add_indicators(df):
-    df["EMA20"] = EMAIndicator(df["Close"], window=20).ema_indicator()
-    df["EMA50"] = EMAIndicator(df["Close"], window=50).ema_indicator()
-    df["RSI"] = RSIIndicator(df["Close"], window=14).rsi()
-    macd = MACD(df["Close"])
+    df["EMA20"] = EMAIndicator(close=df["Close"], window=20).ema_indicator()
+    df["EMA50"] = EMAIndicator(close=df["Close"], window=50).ema_indicator()
+    df["RSI"] = RSIIndicator(close=df["Close"], window=14).rsi()
+    macd = MACD(close=df["Close"])
     df["MACD"] = macd.macd()
     df["MACD_Signal"] = macd.macd_signal()
-    bb = BollingerBands(df["Close"])
+    bb = BollingerBands(close=df["Close"])
     df["BB_High"] = bb.bollinger_hband()
     df["BB_Low"] = bb.bollinger_lband()
     return df
