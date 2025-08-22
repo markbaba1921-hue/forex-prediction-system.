@@ -3,15 +3,17 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
+from plotly.subplots import make_subplots
+import ta
 from datetime import datetime, timedelta
-from ta.trend import EMAIndicator, MACD, ADXIndicator
-from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.volatility import BollingerBands, AverageTrueRange
-from ta.volume import VolumeWeightedAveragePrice
+import requests
+from textblob import TextBlob
+import warnings
+warnings.filterwarnings('ignore')
 
 # Page configuration
 st.set_page_config(
-    page_title="Forex Pro Signals", 
+    page_title="Advanced Forex Trading System", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -20,9 +22,14 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main-header {
-        font-size: 3rem;
+        font-size: 2.5rem;
         color: #1f77b4;
         text-align: center;
+        margin-bottom: 1rem;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #1f77b4;
         margin-bottom: 1rem;
     }
     .signal-buy {
@@ -48,8 +55,11 @@ st.markdown("""
     }
     .stButton>button {
         width: 100%;
-        background-color: #1f77b4;
-        color: white;
+    }
+    .feature-importance-plot {
+        background-color: white;
+        padding: 10px;
+        border-radius: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -62,15 +72,15 @@ FOREX_PAIRS = [
 ]
 
 # ----------------------
-# Fetch data safely
+# Data Ingestion
 # ----------------------
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300)
 def fetch_data(symbol, period="5d", interval="5m"):
+    """Fetch OHLC data from Yahoo Finance"""
     try:
         df = yf.download(symbol, period=period, interval=interval, progress=False)
         if df.empty:
             return None
-        # Flatten MultiIndex if exists
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] for col in df.columns]
         df = df.dropna()
@@ -79,231 +89,375 @@ def fetch_data(symbol, period="5d", interval="5m"):
         st.error(f"Data fetch error: {e}")
         return None
 
+def fetch_fundamental_data():
+    """Fetch fundamental economic data (mock implementation)"""
+    # In a real implementation, you would fetch from APIs like FRED, IMF, etc.
+    fundamentals = {
+        'US_GDP': 1.05,  # % change
+        'US_Unemployment': 3.7,  # %
+        'US_InterestRate': 5.5,  # %
+        'EU_GDP': 0.8,
+        'EU_Unemployment': 6.5,
+        'EU_InterestRate': 4.5,
+    }
+    return fundamentals
+
+def fetch_news_sentiment(symbol="EURUSD"):
+    """Fetch and analyze news sentiment (mock implementation)"""
+    # In a real implementation, you would use NewsAPI, Twitter API, etc.
+    news_items = [
+        "ECB maintains hawkish stance amid inflation concerns",
+        "US job growth exceeds expectations, dollar strengthens",
+        "Brexit negotiations continue to impact GBP volatility"
+    ]
+    
+    sentiments = []
+    for news in news_items:
+        analysis = TextBlob(news)
+        sentiments.append(analysis.sentiment.polarity)
+    
+    avg_sentiment = np.mean(sentiments) if sentiments else 0
+    return avg_sentiment, news_items
+
 # ----------------------
-# Compute indicators
+# Feature Engineering
 # ----------------------
-def add_indicators(df):
+def add_technical_indicators(df):
+    """Add technical indicators to dataframe"""
     # Trend indicators
-    df["EMA20"] = EMAIndicator(close=df["Close"], window=20).ema_indicator()
-    df["EMA50"] = EMAIndicator(close=df["Close"], window=50).ema_indicator()
-    df["EMA100"] = EMAIndicator(close=df["Close"], window=100).ema_indicator()
+    df["EMA20"] = ta.trend.EMAIndicator(close=df["Close"], window=20).ema_indicator()
+    df["EMA50"] = ta.trend.EMAIndicator(close=df["Close"], window=50).ema_indicator()
+    df["EMA100"] = ta.trend.EMAIndicator(close=df["Close"], window=100).ema_indicator()
     
     # MACD
-    macd = MACD(close=df["Close"])
+    macd = ta.trend.MACD(close=df["Close"])
     df["MACD"] = macd.macd()
     df["MACD_Signal"] = macd.macd_signal()
     df["MACD_Histogram"] = macd.macd_diff()
     
     # RSI
-    df["RSI"] = RSIIndicator(close=df["Close"], window=14).rsi()
+    df["RSI"] = ta.momentum.RSIIndicator(close=df["Close"], window=14).rsi()
     
     # Stochastic Oscillator
-    stoch = StochasticOscillator(high=df["High"], low=df["Low"], close=df["Close"], window=14)
+    stoch = ta.momentum.StochasticOscillator(high=df["High"], low=df["Low"], close=df["Close"], window=14)
     df["Stoch_%K"] = stoch.stoch()
     df["Stoch_%D"] = stoch.stoch_signal()
     
     # Bollinger Bands
-    bb = BollingerBands(close=df["Close"])
+    bb = ta.volatility.BollingerBands(close=df["Close"])
     df["BB_High"] = bb.bollinger_hband()
     df["BB_Low"] = bb.bollinger_lband()
     df["BB_Mid"] = bb.bollinger_mavg()
     
     # Average True Range (ATR)
-    df["ATR"] = AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"]).average_true_range()
+    df["ATR"] = ta.volatility.AverageTrueRange(high=df["High"], low=df["Low"], close=df["Close"]).average_true_range()
     
     # ADX
-    df["ADX"] = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"]).adx()
+    df["ADX"] = ta.trend.ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"]).adx()
     
-    # VWAP
-    df["VWAP"] = VolumeWeightedAveragePrice(
-        high=df["High"], low=df["Low"], close=df["Close"], volume=df["Volume"]
-    ).volume_weighted_average_price()
+    # Volume indicators
+    df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
+    
+    return df
+
+def create_composite_features(df, fundamental_data, sentiment_score):
+    """Create composite features from technical, fundamental and sentiment data"""
+    df = df.copy()
+    
+    # Price momentum composite
+    df['Price_Momentum'] = (df['Close'] - df['Close'].shift(5)) / df['Close'].shift(5) * 100
+    
+    # Volatility composite
+    df['Volatility_Ratio'] = df['ATR'] / df['Close'] * 100
+    
+    # Add fundamental data (repeated for each row)
+    df['US_GDP'] = fundamental_data.get('US_GDP', 0)
+    df['US_InterestRate'] = fundamental_data.get('US_InterestRate', 0)
+    
+    # Add sentiment data
+    df['News_Sentiment'] = sentiment_score
+    
+    # Interest rate differential (example for EURUSD)
+    df['Rate_Diff'] = fundamental_data.get('EU_InterestRate', 0) - fundamental_data.get('US_InterestRate', 0)
+    
+    # Remove any rows with NaN values
+    df = df.dropna()
     
     return df
 
 # ----------------------
-# Generate signals with confidence score
+# ML Model (Simulated)
 # ----------------------
-def generate_signals(df):
-    signals = []
-    confidence_scores = []
+def generate_ml_signals(df):
+    """Generate trading signals using a simulated ML model"""
+    # In a real implementation, you would use a trained model
+    # This is a simplified simulation based on multiple factors
     
-    for i in range(1, len(df)):
-        buy_signals = 0
-        sell_signals = 0
-        total_signals = 0
+    signals = []
+    probabilities = []
+    features = []
+    
+    for i in range(len(df)):
+        # Feature vector (simulated model inputs)
+        feature_vector = [
+            df['RSI'].iloc[i] if i < len(df) else 50,
+            df['MACD'].iloc[i] if i < len(df) else 0,
+            df['Stoch_%K'].iloc[i] if i < len(df) else 50,
+            df['Price_Momentum'].iloc[i] if i < len(df) else 0,
+            df['Volatility_Ratio'].iloc[i] if i < len(df) else 0,
+            df['News_Sentiment'].iloc[i] if i < len(df) else 0,
+            df['Rate_Diff'].iloc[i] if i < len(df) else 0,
+        ]
+        features.append(feature_vector)
         
-        # EMA Crossover
-        if df["EMA20"].iloc[i] > df["EMA50"].iloc[i]:
-            buy_signals += 1
-        else:
-            sell_signals += 1
-        total_signals += 1
+        # Simulated model output (in reality, this would come from a trained model)
+        # Weighted combination of indicators
+        score = (
+            0.3 * (70 - df['RSI'].iloc[i])/50 +  # RSI contribution
+            0.2 * np.tanh(df['MACD'].iloc[i] * 10) +  # MACD contribution
+            0.2 * (df['Stoch_%K'].iloc[i] - 50)/50 +  # Stochastic contribution
+            0.1 * np.tanh(df['Price_Momentum'].iloc[i]/5) +  # Momentum contribution
+            0.1 * df['News_Sentiment'].iloc[i] * 2 +  # Sentiment contribution
+            0.1 * np.tanh(df['Rate_Diff'].iloc[i]/2)  # Rate diff contribution
+        )
         
-        # RSI
-        if df["RSI"].iloc[i] < 30:
-            buy_signals += 1
-        elif df["RSI"].iloc[i] > 70:
-            sell_signals += 1
-        total_signals += 1
+        # Convert to probability
+        probability = 1 / (1 + np.exp(-score * 5))
         
-        # MACD
-        if df["MACD"].iloc[i] > df["MACD_Signal"].iloc[i]:
-            buy_signals += 1
-        else:
-            sell_signals += 1
-        total_signals += 1
-        
-        # Stochastic
-        if df["Stoch_%K"].iloc[i] < 20 and df["Stoch_%D"].iloc[i] < 20:
-            buy_signals += 1
-        elif df["Stoch_%K"].iloc[i] > 80 and df["Stoch_%D"].iloc[i] > 80:
-            sell_signals += 1
-        total_signals += 1
-        
-        # Price relative to Bollinger Bands
-        if df["Close"].iloc[i] < df["BB_Low"].iloc[i]:
-            buy_signals += 1
-        elif df["Close"].iloc[i] > df["BB_High"].iloc[i]:
-            sell_signals += 1
-        total_signals += 1
-        
-        # Determine final signal
-        if buy_signals > sell_signals:
+        # Determine signal
+        if probability > 0.6:
             signals.append("BUY")
-            confidence_scores.append(round(buy_signals / total_signals * 100, 1))
-        elif sell_signals > buy_signals:
+            probabilities.append(probability)
+        elif probability < 0.4:
             signals.append("SELL")
-            confidence_scores.append(round(sell_signals / total_signals * 100, 1))
+            probabilities.append(1 - probability)
         else:
             signals.append("NEUTRAL")
-            confidence_scores.append(0)
+            probabilities.append(0.5)
     
-    # Add empty values for the first row
-    signals.insert(0, "")
-    confidence_scores.insert(0, 0)
+    df["ML_Signal"] = signals
+    df["ML_Probability"] = probabilities
     
-    df["Signal"] = signals
-    df["Confidence"] = confidence_scores
-    return df
+    # Feature importance (simulated)
+    feature_importance = {
+        'RSI': 0.3,
+        'MACD': 0.2,
+        'Stochastic': 0.2,
+        'Price Momentum': 0.1,
+        'News Sentiment': 0.1,
+        'Rate Differential': 0.1
+    }
+    
+    return df, feature_importance
 
 # ----------------------
-# Plot chart with signals
+# Risk Management
 # ----------------------
-def plot_chart(df, symbol):
-    # Create subplots
-    fig = go.Figure()
+def calculate_position_size(balance, risk_per_trade, entry_price, stop_loss):
+    """Calculate position size based on risk management rules"""
+    risk_amount = balance * (risk_per_trade / 100)
+    price_diff = abs(entry_price - stop_loss)
+    position_size = risk_amount / price_diff
+    return position_size
+
+def apply_risk_management(df, balance=10000, risk_per_trade=1):
+    """Apply risk management to generate trading decisions"""
+    trades = []
+    current_balance = balance
+    position = 0
+    entry_price = 0
+    stop_loss = 0
+    take_profit = 0
     
-    # Main price chart
+    for i, row in df.iterrows():
+        # Check if we need to exit a position
+        if position != 0:
+            # Check stop loss
+            if (position > 0 and row['Low'] <= stop_loss) or (position < 0 and row['High'] >= stop_loss):
+                pnl = position * (stop_loss - entry_price) if position > 0 else position * (entry_price - stop_loss)
+                current_balance += pnl
+                trades.append({
+                    'Entry_Time': i,
+                    'Exit_Time': i,
+                    'Type': 'STOP_LOSS',
+                    'Price': stop_loss,
+                    'PnL': pnl,
+                    'Balance': current_balance
+                })
+                position = 0
+            
+            # Check take profit
+            elif (position > 0 and row['High'] >= take_profit) or (position < 0 and row['Low'] <= take_profit):
+                pnl = position * (take_profit - entry_price) if position > 0 else position * (entry_price - take_profit)
+                current_balance += pnl
+                trades.append({
+                    'Entry_Time': i,
+                    'Exit_Time': i,
+                    'Type': 'TAKE_PROFIT',
+                    'Price': take_profit,
+                    'PnL': pnl,
+                    'Balance': current_balance
+                })
+                position = 0
+        
+        # Check if we should enter a new position
+        if position == 0 and row['ML_Signal'] in ['BUY', 'SELL']:
+            entry_price = row['Close']
+            atr = row['ATR']
+            
+            # Set stop loss and take profit based on ATR
+            if row['ML_Signal'] == 'BUY':
+                stop_loss = entry_price - 2 * atr
+                take_profit = entry_price + 3 * atr
+                position = calculate_position_size(current_balance, risk_per_trade, entry_price, stop_loss)
+            else:  # SELL
+                stop_loss = entry_price + 2 * atr
+                take_profit = entry_price - 3 * atr
+                position = -calculate_position_size(current_balance, risk_per_trade, entry_price, stop_loss)
+            
+            trades.append({
+                'Entry_Time': i,
+                'Exit_Time': None,
+                'Type': 'ENTER',
+                'Price': entry_price,
+                'PnL': 0,
+                'Balance': current_balance
+            })
+    
+    # Close any open position at the end
+    if position != 0:
+        exit_price = df.iloc[-1]['Close']
+        pnl = position * (exit_price - entry_price) if position > 0 else position * (entry_price - exit_price)
+        current_balance += pnl
+        trades.append({
+            'Entry_Time': trades[-1]['Entry_Time'],
+            'Exit_Time': df.index[-1],
+            'Type': 'CLOSE_END',
+            'Price': exit_price,
+            'PnL': pnl,
+            'Balance': current_balance
+        })
+    
+    return pd.DataFrame(trades), current_balance
+
+# ----------------------
+# Visualization
+# ----------------------
+def plot_trading_signals(df, trades_df):
+    """Plot price chart with trading signals and annotations"""
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.1,
+        subplot_titles=('Price with Signals', 'Technical Indicators'),
+        row_width=[0.7, 0.3]
+    )
+    
+    # Price data
     fig.add_trace(go.Candlestick(
         x=df.index,
-        open=df["Open"], high=df["High"],
-        low=df["Low"], close=df["Close"],
-        name="Price"
-    ))
+        open=df['Open'], high=df['High'],
+        low=df['Low'], close=df['Close'],
+        name='Price'
+    ), row=1, col=1)
     
     # EMA lines
-    fig.add_trace(go.Scatter(x=df.index, y=df["EMA20"], line=dict(color="blue", width=1), name="EMA20"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["EMA50"], line=dict(color="orange", width=1), name="EMA50"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["EMA100"], line=dict(color="purple", width=1), name="EMA100"))
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA20'], line=dict(color='blue', width=1), name='EMA20'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['EMA50'], line=dict(color='orange', width=1), name='EMA50'), row=1, col=1)
     
     # Bollinger Bands
-    fig.add_trace(go.Scatter(x=df.index, y=df["BB_High"], line=dict(color="gray", width=1, dash='dash'), name="BB Upper"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["BB_Mid"], line=dict(color="gray", width=1), name="BB Middle", opacity=0.5))
-    fig.add_trace(go.Scatter(x=df.index, y=df["BB_Low"], line=dict(color="gray", width=1, dash='dash'), name="BB Lower", fill='tonexty', opacity=0.1))
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_High'], line=dict(color='gray', width=1, dash='dash'), name='BB Upper'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Low'], line=dict(color='gray', width=1, dash='dash'), name='BB Lower', fill='tonexty'), row=1, col=1)
     
-    # Buy/Sell markers
-    buys = df[df["Signal"] == "BUY"]
-    sells = df[df["Signal"] == "SELL"]
+    # Add trade entries and exits
+    if trades_df is not None and not trades_df.empty:
+        entries = trades_df[trades_df['Type'] == 'ENTER']
+        exits = trades_df[trades_df['Type'].isin(['STOP_LOSS', 'TAKE_PROFIT', 'CLOSE_END'])]
+        
+        # Entry points
+        fig.add_trace(go.Scatter(
+            x=entries['Entry_Time'], y=entries['Price'],
+            mode='markers', marker=dict(color='green', size=10, symbol='triangle-up'),
+            name='Entry'
+        ), row=1, col=1)
+        
+        # Exit points
+        fig.add_trace(go.Scatter(
+            x=exits['Exit_Time'], y=exits['Price'],
+            mode='markers', marker=dict(color='red', size=10, symbol='triangle-down'),
+            name='Exit'
+        ), row=1, col=1)
     
-    fig.add_trace(go.Scatter(
-        x=buys.index, y=buys["Low"] * 0.998, 
-        mode="markers", 
-        marker=dict(color="green", size=12, symbol="triangle-up"),
-        name="BUY"
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=sells.index, y=sells["High"] * 1.002, 
-        mode="markers", 
-        marker=dict(color="red", size=12, symbol="triangle-down"),
-        name="SELL"
-    ))
+    # RSI
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1), name='RSI'), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5, row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5, row=2, col=1)
     
     fig.update_layout(
-        title=f"{symbol} Price Chart with Signals",
+        title='Trading Signals with Risk Management',
         xaxis_rangeslider_visible=False,
         template="plotly_white",
-        height=600,
+        height=800,
         showlegend=True
     )
     
     return fig
 
-# ----------------------
-# Plot indicator subplots
-# ----------------------
-def plot_indicators(df):
-    # Create figure with secondary y-axis
+def plot_equity_curve(trades_df):
+    """Plot equity curve from trades"""
+    if trades_df is None or trades_df.empty:
+        return None
+        
+    equity_df = trades_df[trades_df['Type'].isin(['STOP_LOSS', 'TAKE_PROFIT', 'CLOSE_END'])].copy()
+    if equity_df.empty:
+        return None
+        
+    equity_df['Cumulative_PnL'] = equity_df['PnL'].cumsum()
+    
     fig = go.Figure()
-    
-    # RSI
-    fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI", line=dict(color="purple")))
-    
-    # Add reference lines
-    fig.add_hline(y=70, line_dash="dash", line_color="red", opacity=0.5)
-    fig.add_hline(y=30, line_dash="dash", line_color="green", opacity=0.5)
-    fig.add_hline(y=50, line_dash="solid", line_color="gray", opacity=0.5)
+    fig.add_trace(go.Scatter(x=equity_df['Exit_Time'], y=equity_df['Cumulative_PnL'], 
+                            mode='lines', name='Equity Curve'))
     
     fig.update_layout(
-        title="RSI Indicator",
-        xaxis_rangeslider_visible=False,
+        title='Equity Curve',
+        xaxis_title='Date',
+        yaxis_title='Profit/Loss ($)',
         template="plotly_white",
-        height=300
+        height=400
+    )
+    
+    return fig
+
+def plot_feature_importance(feature_importance):
+    """Plot feature importance chart"""
+    features = list(feature_importance.keys())
+    importance = list(feature_importance.values())
+    
+    fig = go.Figure(go.Bar(
+        x=importance,
+        y=features,
+        orientation='h'
+    ))
+    
+    fig.update_layout(
+        title='Simulated Feature Importance',
+        xaxis_title='Importance',
+        yaxis_title='Features',
+        template="plotly_white",
+        height=400
     )
     
     return fig
 
 # ----------------------
-# Display performance metrics
-# ----------------------
-def display_metrics(df):
-    col1, col2, col3, col4 = st.columns(4)
-    
-    current_price = df["Close"].iloc[-1]
-    prev_price = df["Close"].iloc[-2] if len(df) > 1 else current_price
-    price_change = current_price - prev_price
-    price_change_pct = (price_change / prev_price) * 100
-    
-    with col1:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.metric("Current Price", f"{current_price:.5f}", 
-                 f"{price_change:.5f} ({price_change_pct:.2f}%)")
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        rsi_value = df["RSI"].iloc[-1]
-        rsi_status = "Overbought" if rsi_value > 70 else "Oversold" if rsi_value < 30 else "Neutral"
-        st.metric("RSI", f"{rsi_value:.2f}", rsi_status)
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        st.metric("ATR", f"{df['ATR'].iloc[-1]:.5f}", "Volatility")
-        st.markdown("</div>", unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-        adx_value = df["ADX"].iloc[-1]
-        trend_strength = "Strong" if adx_value > 25 else "Weak" if adx_value < 20 else "Moderate"
-        st.metric("ADX", f"{adx_value:.2f}", trend_strength)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# ----------------------
 # Streamlit UI
 # ----------------------
-st.markdown("<h1 class='main-header'>📈 Forex Pro Signals — Advanced Analysis</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='main-header'>Advanced Forex Trading System</h1>", unsafe_allow_html=True)
+st.markdown("""
+<div style='text-align: center; margin-bottom: 20px;'>
+    <p>ML-powered trading signals with comprehensive risk management</p>
+</div>
+""", unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
@@ -312,83 +466,135 @@ with st.sidebar:
     # Symbol selection
     selected_symbol = st.selectbox("Select Forex Pair", FOREX_PAIRS, index=0)
     custom_symbol = st.text_input("Or enter custom symbol", "EURUSD=X")
-    
     symbol = custom_symbol if custom_symbol else selected_symbol
     
     # Time settings
-    period = st.selectbox("Time Period", ["1d", "5d", "1mo", "3mo", "6mo", "1y"], index=1)
-    interval = st.selectbox("Interval", ["1m", "5m", "15m", "30m", "1h", "1d"], index=2)
+    period = st.selectbox("Time Period", ["5d", "1mo", "3mo", "6mo", "1y"], index=1)
+    interval = st.selectbox("Interval", ["5m", "15m", "30m", "1h", "1d"], index=1)
+    
+    # Risk management settings
+    st.subheader("Risk Management")
+    initial_balance = st.number_input("Initial Balance ($)", min_value=1000, max_value=100000, value=10000, step=1000)
+    risk_per_trade = st.slider("Risk per Trade (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
     
     # Strategy settings
     st.subheader("Strategy Settings")
-    use_ema = st.checkbox("Use EMA Crossovers", value=True)
-    use_rsi = st.checkbox("Use RSI", value=True)
-    use_macd = st.checkbox("Use MACD", value=True)
-    use_stoch = st.checkbox("Use Stochastic", value=True)
-    use_bb = st.checkbox("Use Bollinger Bands", value=True)
+    use_ml = st.checkbox("Use ML Signals", value=True)
+    use_risk_management = st.checkbox("Apply Risk Management", value=True)
     
     # Info
     st.info("""
-    This dashboard provides technical analysis for Forex pairs using multiple indicators.
-    Signals are generated based on indicator convergence.
+    This system uses simulated ML models for demonstration.
+    Always test strategies thoroughly before live trading.
     """)
 
 # Main content
-if st.button("Analyze Market", type="primary"):
-    with st.spinner("Fetching data and analyzing..."):
+if st.button("Run Analysis", type="primary"):
+    with st.spinner("Collecting data and generating signals..."):
+        # Data Ingestion
         df = fetch_data(symbol, period, interval)
         
         if df is None or df.empty:
             st.error("No data returned. Try a different timeframe or symbol.")
         else:
-            df = add_indicators(df)
-            df = generate_signals(df)
+            # Fetch additional data
+            fundamental_data = fetch_fundamental_data()
+            sentiment_score, news_items = fetch_news_sentiment(symbol)
             
-            # Latest Signal
-            latest = df.iloc[-1]
-            st.subheader("📢 Latest Signal")
+            # Feature Engineering
+            df = add_technical_indicators(df)
+            df = create_composite_features(df, fundamental_data, sentiment_score)
             
-            if latest["Signal"] == "BUY":
-                st.markdown(f"<p class='signal-buy'>BUY signal with {latest['Confidence']}% confidence</p>", unsafe_allow_html=True)
-            elif latest["Signal"] == "SELL":
-                st.markdown(f"<p class='signal-sell'>SELL signal with {latest['Confidence']}% confidence</p>", unsafe_allow_html=True)
-            else:
-                st.markdown(f"<p class='signal-neutral'>NEUTRAL - No strong signal detected</p>", unsafe_allow_html=True)
+            # Generate ML Signals
+            if use_ml:
+                df, feature_importance = generate_ml_signals(df)
+                
+                # Display latest signal
+                latest = df.iloc[-1]
+                st.subheader("📊 Latest ML Signal")
+                
+                if latest["ML_Signal"] == "BUY":
+                    st.markdown(f"<p class='signal-buy'>BUY signal with {latest['ML_Probability']*100:.1f}% confidence</p>", unsafe_allow_html=True)
+                elif latest["ML_Signal"] == "SELL":
+                    st.markdown(f"<p class='signal-sell'>SELL signal with {(1-latest['ML_Probability'])*100:.1f}% confidence</p>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"<p class='signal-neutral'>NEUTRAL - No strong signal detected</p>", unsafe_allow_html=True)
             
-            # Display metrics
-            display_metrics(df)
+            # Apply Risk Management
+            trades_df = None
+            final_balance = initial_balance
             
-            # Plot Chart
-            fig = plot_chart(df, symbol)
+            if use_risk_management and use_ml:
+                trades_df, final_balance = apply_risk_management(df, initial_balance, risk_per_trade)
+                
+                # Display performance metrics
+                st.subheader("💰 Performance Metrics")
+                
+                if trades_df is not None and not trades_df.empty:
+                    closed_trades = trades_df[trades_df['Type'].isin(['STOP_LOSS', 'TAKE_PROFIT', 'CLOSE_END'])]
+                    
+                    if not closed_trades.empty:
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            total_trades = len(closed_trades)
+                            st.metric("Total Trades", total_trades)
+                        
+                        with col2:
+                            winning_trades = len(closed_trades[closed_trades['PnL'] > 0])
+                            win_rate = winning_trades / total_trades * 100 if total_trades > 0 else 0
+                            st.metric("Win Rate", f"{win_rate:.1f}%")
+                        
+                        with col3:
+                            total_pnl = closed_trades['PnL'].sum()
+                            st.metric("Total PnL", f"${total_pnl:.2f}")
+                        
+                        with col4:
+                            balance_change = ((final_balance - initial_balance) / initial_balance) * 100
+                            st.metric("Balance Change", f"{balance_change:.1f}%")
+            
+            # Display charts
+            st.subheader("📈 Price Chart with Signals")
+            fig = plot_trading_signals(df, trades_df)
             st.plotly_chart(fig, use_container_width=True)
             
-            # Indicators plot
-            fig_indicators = plot_indicators(df)
-            st.plotly_chart(fig_indicators, use_container_width=True)
+            # Equity curve
+            if trades_df is not None:
+                equity_fig = plot_equity_curve(trades_df)
+                if equity_fig:
+                    st.plotly_chart(equity_fig, use_container_width=True)
+            
+            # Feature importance
+            if use_ml:
+                st.subheader("📋 Feature Importance")
+                importance_fig = plot_feature_importance(feature_importance)
+                st.plotly_chart(importance_fig, use_container_width=True)
+            
+            # News sentiment
+            st.subheader("📰 News Sentiment")
+            st.metric("Average Sentiment Score", f"{sentiment_score:.3f}")
+            
+            for news in news_items:
+                st.write(f"- {news}")
             
             # Show data
-            st.subheader("📊 Historical Data with Signals")
-            display_df = df.tail(10).copy()
-            display_df.index = display_df.index.strftime('%Y-%m-%d %H:%M')
-            st.dataframe(display_df.style.format({
-                'Open': '{:.5f}', 'High': '{:.5f}', 'Low': '{:.5f}', 'Close': '{:.5f}',
-                'EMA20': '{:.5f}', 'EMA50': '{:.5f}', 'EMA100': '{:.5f}',
-                'RSI': '{:.2f}', 'ATR': '{:.5f}', 'ADX': '{:.2f}'
-            }))
-            
-            # Export option
-            csv = df.to_csv().encode('utf-8')
-            st.download_button(
-                label="Download Data as CSV",
-                data=csv,
-                file_name=f"{symbol}_forex_data.csv",
-                mime="text/csv",
-            )
+            st.subheader("📊 Processed Data")
+            with st.expander("View processed data with features"):
+                display_df = df.tail(10).copy()
+                display_df.index = display_df.index.strftime('%Y-%m-%d %H:%M')
+                st.dataframe(display_df.style.format({
+                    'Open': '{:.5f}', 'High': '{:.5f}', 'Low': '{:.5f}', 'Close': '{:.5f}',
+                    'EMA20': '{:.5f}', 'EMA50': '{:.5f}', 'EMA100': '{:.5f}',
+                    'RSI': '{:.2f}', 'ATR': '{:.5f}', 'ADX': '{:.2f}',
+                    'ML_Probability': '{:.3f}'
+                }))
 
 # Footer
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center'>
-    <p>Forex Pro Signals Dashboard | This is for educational purposes only. Trading involves risk.</p>
+    <p><strong>Disclaimer:</strong> This is a simulated trading system for educational purposes only. 
+    Trading financial instruments involves risk and is not suitable for all investors.</p>
+    <p>Always test strategies thoroughly with backtesting and paper trading before risking real capital.</p>
 </div>
 """, unsafe_allow_html=True)
